@@ -1,0 +1,37 @@
+[
+  {
+    "id": "deep-research",
+    "name": "Deep Research",
+    "use_when": "The user wants a researched, sourced report or an in-depth briefing on a topic, which requires searching the web across many sources. Examples: 'research the pros and cons of heat pumps', 'write a report on the CPAP market', 'compare these 5 vendors with sources', 'give me a briefing on X for a meeting'.",
+    "avoid_when": "A quick factual question, a single definition, casual chat, a request to write or edit text that needs no research, or brainstorming and planning that relies on the user's own situation rather than outside sources.",
+    "hint": "It searches dozens of sources and writes up a full report for you."
+  },
+  {
+    "id": "code-assistant",
+    "name": "Code Assistant",
+    "use_when": "The user wants to build, write, debug, refactor or deploy software: apps, websites, scripts, automations, or multi-file projects. Examples: 'build me a web app that tracks inventory', 'write a Python script to rename these files', 'fix this error in my code'.",
+    "avoid_when": "Questions about how to use a normal software product, spreadsheet formulas, general tech questions with no code to write, or requests for an SVG or other graphic (even though SVG is technically code).",
+    "hint": "It's built for coding and can break big projects into pieces and build them for you."
+  },
+  {
+    "id": "problem-solver-ai",
+    "name": "Problem Solver",
+    "use_when": "The user has a complex, open-ended problem that needs careful multi-step reasoning, a detailed plan, a hard decision weighed, or a thoughtful back-and-forth to develop their own ideas. Examples: 'help me plan the staffing for a new location', 'I can't decide between two job offers, help me think it through', 'work through this tricky scheduling problem', 'help me come up with ideas for...'.",
+    "avoid_when": "Simple questions with a direct answer, tasks that need web research and sources, writing code, generating images, or routine requests like rewriting an email or summarizing a short text.",
+    "hint": "It's a stronger thinking model that's good at working through hard problems step by step."
+  },
+  {
+    "id": "image-creation-editing",
+    "name": "Image Creation & Editing",
+    "use_when": "The user wants a picture, photo, illustration, or artwork created, or wants an uploaded image edited (remove or change objects, change style or background, touch up, combine images). Examples: 'make a picture of a cozy cabin in the snow', 'remove the person from this photo', 'turn this into a watercolor'.",
+    "avoid_when": "The user wants a logo, icon, or scalable/vector graphic or SVG file (use the vector model), or only wants an image described, analyzed or read (OCR) rather than created or changed.",
+    "hint": "It creates new images and can edit photos you upload."
+  },
+  {
+    "id": "vector-graphics-art",
+    "name": "Vector Graphics (SVG)",
+    "use_when": "The user wants a vector graphic or SVG file: logos, icons, simple illustrations, diagrams or shapes that need to scale cleanly or be edited later. Examples: 'make an SVG logo for my rental', 'design a simple icon set', 'give me a vector illustration of a mountain'.",
+    "avoid_when": "Photorealistic images, paintings or edits to an uploaded photo (use the image model), or charts and diagrams the user just wants shown in the chat.",
+    "hint": "It makes a clean, scalable SVG file you can download and edit."
+  }
+]
