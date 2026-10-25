@@ -11,14 +11,14 @@ An [Open WebUI](https://github.com/open-webui/open-webui) **Filter** that lets a
 4. On Switch, the conversation continues in a new chat on the specialist model. If the original chat held only that one message, it is deleted and hidden from the sidebar.
 
 ## Features
-- Admin-configurable target list (`targets_json` valve): `id`, `name`, `use_when`, `avoid_when`, `hint`. IDs must exactly match real Open WebUI model IDs.
+- Admin-configurable target list (`targets_json` valve): `id`, `name`, `use_when`, `avoid_when`, `hint`. See [examples/targets.example.json](examples/targets.example.json). IDs must exactly match real Open WebUI model IDs.
 - Model card popup with dark-mode support, Escape = stay, and a plain-popup fallback (`show_model_card`).
 - Old single-message chat cleanup with immediate sidebar hiding and retries (`delete_old_chat`).
 - Router API keys encrypted at rest with Fernet, keyed from `WEBUI_SECRET_KEY` (`encrypt_api_keys`).
 
 ## Install
 1. In Open WebUI: **Admin Panel > Functions > +**, paste `model_handoff.py`, save, and enable it.
-2. Open its valves and set the router settings and `targets_json`.
+2. Open its valves and set the router model/API settings and `targets_json`.
 3. Attach the filter to your default model.
 4. Make sure `WEBUI_SECRET_KEY` is set in the server environment.
 
