@@ -1,9 +1,9 @@
 """
 title: Model Handoff
 author: Keenan Ventling
-version: 0.8.0
+version: 0.9.0
 license: MIT
-description: Attach to a fast general-purpose model. When a request fits a specialist model better, asks the user (popup) and, if they agree, continues the conversation in a new chat on that model. If the original chat held only a single user message, it is deleted after the handoff and its sidebar entry is hidden immediately, with retries (valve: delete_old_chat). The confirmation popup shows a card with the specialist model's icon and description (valve: show_model_card). API keys are encrypted at rest (Fernet, key derived from WEBUI_SECRET_KEY; valve: encrypt_api_keys); 0.8.0 fixes the save-back so the stored valve really becomes enc:v1:... (the function id now comes from Open WebUI's __id__). On clients that cannot run the browser script (e.g. native mobile apps like Conduit) the handoff degrades gracefully: the user gets a text notice to start a new chat on the specialist and the current chat keeps working (valves: mobile_fallback, js_ack_timeout_s). Admin-configurable target list. Developed against Open WebUI v0.12.3.
+description: Attach to a fast general-purpose model. When a request fits a specialist model better, asks the user (popup) and, if they agree, continues the conversation in a new chat on that model. If the original chat held only a single user message, it is deleted after the handoff and its sidebar entry is hidden immediately, with retries (valve: delete_old_chat). The confirmation popup shows a card with the specialist model's icon and description (valve: show_model_card). API keys are encrypted at rest (Fernet, key derived from WEBUI_SECRET_KEY; valve: encrypt_api_keys); 0.8.0 fixes the save-back so the stored valve really becomes enc:v1:... (the function id now comes from Open WebUI's __id__). The Conduit mobile app is supported natively through its chat:handoff event (valve: conduit_native_handoff): Conduit shows its own switch dialog and opens the new chat with the prompt ready in the composer, and the old one-message chat is deleted from the server side. On other clients that cannot run the browser script (e.g. Open Relay) the handoff degrades gracefully: the user gets a text notice to start a new chat on the specialist and the current chat keeps working (valves: mobile_fallback, js_ack_timeout_s). Admin-configurable target list. Developed against Open WebUI v0.12.3.
 requirements: httpx, cryptography
 """
 
@@ -416,6 +416,11 @@ def build_card_js(*, title: str, message: str, name: str, model_id: str, fallbac
     return CARD_JS.replace("__DATA__", json.dumps(data))
 
 
+class HandoffSwitch(Exception):
+    """Deliberate signal that the browser is moving to the new chat: raised on purpose to stop the
+    current model from answering. It is the ONLY exception inlet() lets escape."""
+
+
 class Filter:
     class Valves(BaseModel):
         priority: int = Field(0, description="Filter priority (lower runs first).")
@@ -456,10 +461,13 @@ class Filter:
         compaction_timeout_s: float = Field(45.0, description="Timeout for the summary step.")
         auto_send: bool = Field(True, description="Automatically send the handed-off message in the new chat.")
         offer_way_back: bool = Field(True, description="Tell the specialist how the user can return to the quick assistant.")
-        delete_old_chat: bool = Field(True, description="After a handoff, delete the old chat if it contained only ONE user message (nothing worth keeping). Needs auto_send on.")
+        delete_old_chat: bool = Field(True, description="After a handoff, delete the old chat if it contained only ONE user message (nothing worth keeping). In the browser this needs auto_send on. For the Conduit app the chat is deleted from the server side after Conduit confirms the switch (auto_send does not apply).")
         show_model_card: bool = Field(True, description="Show the specialist's icon and description in a card on the popup. Falls back to the plain popup if the card cannot be shown.")
         mobile_fallback: bool = Field(True, description="If the client cannot run the handoff script (native mobile apps, no browser DOM), do not abort the reply: show a text notice telling the user to start a new chat with the specialist, and answer in the current chat. Turn off to restore the old behaviour (raise an error to stop the reply).")
         js_ack_timeout_s: float = Field(10.0, description="How long to wait for the client to confirm it ran the handoff script before assuming it cannot (non-web client).")
+        conduit_native_handoff: bool = Field(True, description="Use the Conduit app's native chat:handoff event (needs a Conduit build with PR #890). Conduit shows its own switch dialog and opens the new chat with the prompt UNSENT in the composer (auto_send does not apply). Turn off to treat Conduit like any other non-browser client.")
+        conduit_handoff_timeout_s: float = Field(120.0, description="How long to wait for the Conduit user to answer the native switch dialog.")
+        delete_delay_s: float = Field(3.0, description="Conduit only: seconds to wait after a confirmed handoff before deleting the old chat on the server (a second pass runs about 7s later). The delay lets the aborted request finish saving first.")
         encrypt_api_keys: bool = Field(True, description="Encrypt api_key / chat_api_key at rest (Fernet, key derived from WEBUI_SECRET_KEY). A plaintext key is encrypted and saved back automatically on first use.")
         log_decisions: bool = Field(True, description="Log scores and outcomes to the server log for tuning.")
 
@@ -470,6 +478,8 @@ class Filter:
         self._chat_api_key = ""
         self._persist_warned = False
         self._fid: Optional[str] = None  # real function id, set from __id__ in inlet
+        self._clients: dict[str, tuple[str, float]] = {}  # chat_id -> (client kind, timestamp)
+        self._tasks: set[asyncio.Task] = set()  # strong refs so background cleanups are not garbage collected
 
     # ---------------------------------------------------------------- internals
     def _log(self, **kw):
@@ -606,8 +616,12 @@ class Filter:
             except Exception as e:
                 self._log(outcome="card_error", error=str(e))
         hint = f"\n\n{target['hint']}" if target["hint"] else ""
-        return bool(await call({"type": "confirmation", "data": {
-            "title": f"Switch to {target['name']}?", "message": f"{lead}{hint}\n\n{footer}"}}))
+        try:
+            return bool(await call({"type": "confirmation", "data": {
+                "title": f"Switch to {target['name']}?", "message": f"{lead}{hint}\n\n{footer}"}}))
+        except Exception as e:  # cannot ask => do not switch
+            self._log(outcome="confirm_error", error=str(e))
+            return False
 
     async def _run_handoff_js(self, call: Callable[[dict], Awaitable[Any]], code: str) -> bool:
         """Run the navigation script; True only if the client confirmed it ran (the script ends with
@@ -628,6 +642,215 @@ class Filter:
             return True
         self._log(outcome="js_no_ack", reason="result", got=repr(res)[:80])
         return False
+
+    # ---------------------------------------------------------------- Conduit (native mobile app)
+    @staticmethod
+    def _unwrap(res: Any, key: str) -> Any:
+        """Tolerate a client that wraps its reply as {'result': ...} / {'value': ...}."""
+        if isinstance(res, dict) and key not in res:
+            return res.get("result", res.get("value", res))
+        return res
+
+    @staticmethod
+    def _is_conduit(res: Any) -> bool:
+        """True only for Conduit's documented reply to an `execute` event: it carries client == 'conduit'
+        and advertises the chat:handoff capability. Anything else (a browser's result, an older Conduit
+        without the capability) must NOT be sent chat:handoff, because a browser never answers it."""
+        res = Filter._unwrap(res, "client")
+        if not isinstance(res, dict) or res.get("client") != "conduit":
+            return False
+        caps = res.get("capabilities")
+        return isinstance(caps, (list, tuple, set)) and "chat:handoff" in caps
+
+    async def _detect_client(self, call: Callable[[dict], Awaitable[Any]], chat_id: str) -> str:
+        """Returns 'conduit' or 'other'. Probes with a trivial `execute`: a browser runs it and returns,
+        Conduit answers at once with its client/capabilities dict. Cached per chat. Never raises."""
+        now = time.time()
+        cached = self._clients.get(chat_id) if chat_id else None
+        if cached and now - cached[1] < 3600:
+            return cached[0]
+        kind = "other"
+        try:
+            res = await asyncio.wait_for(call({"type": "execute", "data": {"code": "return 'browser';"}}),
+                                         timeout=self.valves.js_ack_timeout_s)
+            if self._is_conduit(res):
+                kind = "conduit"
+        except asyncio.TimeoutError:
+            self._log(chat=chat_id, outcome="client_probe", result="timeout")
+        except Exception as e:
+            self._log(chat=chat_id, outcome="client_probe", result="error", error=str(e))
+        if chat_id:
+            if len(self._clients) > 2000:
+                self._clients = {k: x for k, x in self._clients.items() if now - x[1] < 3600}
+            self._clients[chat_id] = (kind, now)
+        self._log(chat=chat_id, outcome="client_probe", client=kind)
+        return kind
+
+    async def _conduit_handoff(self, call: Callable[[dict], Awaitable[Any]], model_id: str, prompt: str) -> tuple[bool, str]:
+        """Send Conduit's native chat:handoff. Returns (handled, reason). Never raises.
+        Only call after _detect_client returned 'conduit'."""
+        try:
+            res = await asyncio.wait_for(
+                call({"type": "chat:handoff", "data": {"model_id": model_id, "prompt": prompt}}),
+                timeout=self.valves.conduit_handoff_timeout_s)
+        except asyncio.TimeoutError:
+            return False, "timeout"
+        except Exception as e:
+            return False, f"error: {type(e).__name__}: {e}"
+        res = self._unwrap(res, "handled")
+        if isinstance(res, dict):
+            if res.get("handled") is True:
+                return True, ""
+            return False, str(res.get("reason") or "unknown")
+        return False, f"bad_reply: {repr(res)[:80]}"
+
+    @staticmethod
+    def _file_names(files: list) -> list[str]:
+        names = []
+        for f in files or []:
+            if not isinstance(f, dict):
+                continue
+            inner = f.get("file") if isinstance(f.get("file"), dict) else {}
+            name = f.get("name") or inner.get("filename") or (inner.get("meta") or {}).get("name")
+            if name:
+                names.append(str(name))
+        return names
+
+    @staticmethod
+    def _chat_is_disposable(chat: Any) -> tuple[bool, str]:
+        """Final check on the STORED chat right before deleting: a single user message, no real
+        assistant reply, and not pinned / archived / in a folder / shared. Returns (ok, why_not)."""
+        def attr(name: str) -> Any:
+            return chat.get(name) if isinstance(chat, dict) else getattr(chat, name, None)
+        if attr("pinned"):
+            return False, "pinned"
+        if attr("archived"):
+            return False, "archived"
+        if attr("folder_id"):
+            return False, "in_folder"
+        if attr("share_id"):
+            return False, "shared"
+        data = attr("chat") or {}
+        msgs = (data.get("history") or {}).get("messages")
+        if isinstance(msgs, dict):
+            items = list(msgs.values())
+        else:
+            items = data.get("messages") or []
+        n_user = sum(1 for m in items if isinstance(m, dict) and m.get("role") == "user")
+        # an aborted request may leave an EMPTY assistant placeholder; only real replies count
+        n_reply = sum(1 for m in items if isinstance(m, dict) and m.get("role") == "assistant"
+                      and str(m.get("content") or "").strip())
+        if n_user > 1:
+            return False, "multiple_user_messages"
+        if n_reply:
+            return False, "has_assistant_reply"
+        return True, ""
+
+    async def _delete_chat_backend(self, chat_id: str, user_id: str) -> bool:
+        """Delete the old chat straight from Open WebUI's database (the filter runs server-side, so the
+        client is not involved). Guarded and fully exception-safe. Returns True if a delete was issued."""
+        try:
+            if not chat_id or chat_id.startswith("local:") or not user_id:
+                self._log(chat=chat_id, outcome="cleanup_skipped", why="no_real_chat_or_user")
+                return False
+            from open_webui.models.chats import Chats  # internal API, not stable: every step is guarded
+
+            async def maybe_await(x):
+                return await x if inspect.isawaitable(x) else x
+
+            chat = await maybe_await(Chats.get_chat_by_id_and_user_id(chat_id, user_id))
+            if not chat:
+                self._log(chat=chat_id, outcome="cleanup_skipped", why="not_found")
+                return False
+            ok, why = self._chat_is_disposable(chat)
+            if not ok:
+                self._log(chat=chat_id, outcome="cleanup_skipped", why=why)
+                return False
+            res = await maybe_await(Chats.delete_chat_by_id_and_user_id(chat_id, user_id))
+            self._log(chat=chat_id, outcome="cleanup_deleted", result=bool(res))
+            return True
+        except Exception as e:
+            log.warning("handoff could not delete the old chat %s (%s: %s)", chat_id, type(e).__name__, e)
+            return False
+
+    async def _cleanup_old_chat(self, chat_id: str, user_id: str) -> None:
+        """Two passes: the aborted request may re-save the chat as it unwinds, so delete after a short
+        delay and once more a few seconds later (the second pass is a no-op when the chat is gone)."""
+        try:
+            delay = max(0.0, float(self.valves.delete_delay_s))
+            await asyncio.sleep(delay)
+            await self._delete_chat_backend(chat_id, user_id)
+            await asyncio.sleep(7.0)
+            await self._delete_chat_backend(chat_id, user_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("handoff cleanup task failed (%s: %s)", type(e).__name__, e)
+
+    def _schedule_cleanup(self, chat_id: str, user_id: str) -> None:
+        task = asyncio.create_task(self._cleanup_old_chat(chat_id, user_id))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _build_prompt(self, msgs: list[dict], target: dict, reason: str, model: Optional[dict], n_user: int) -> str:
+        first_turn = n_user <= 1
+        summary = ""
+        if not first_turn:
+            try:
+                summary = await self._compact(msgs)
+            except Exception:
+                summary = "\n".join(f"{m.get('role')}: {text_of(m)[:500]}" for m in msgs[-7:-1])
+        back = ("(If the user wants quick everyday help again, suggest they start a new chat with the "
+                "general assistant.)\n\n") if self.valves.offer_way_back else ""
+        return build_handoff_prompt(
+            first_turn=first_turn, latest=text_of(msgs[-1]), reason=reason or target["use_when"], summary=summary,
+            from_name=(model or {}).get("name") or "a general assistant", back_hint=back)
+
+    async def _conduit_flow(self, body: dict, *, msgs: list[dict], target: dict, reason: str, chat_id: str,
+                            n_user: int, files: list, user: Optional[dict], model: Optional[dict], call, emitter) -> dict:
+        """Handoff on the Conduit app. Conduit asks the user itself, so we show no popup of our own.
+        Returns the body to continue with, or raises HandoffSwitch once Conduit confirms the switch."""
+        v = self.valves
+        await self._emit(emitter, f"Preparing the switch to {target['name']}…", False)
+        prompt = await self._build_prompt(msgs, target, reason, model, n_user)
+        names = self._file_names(files) if files else []
+        if files:  # Conduit does not carry attachments over
+            listed = f": {', '.join(names)}" if names else ""
+            prompt += f"\n\n(The original message had attachments{listed}. They were not carried over; please re-attach them.)"
+        handled, why = await self._conduit_handoff(call, target["id"], prompt)
+        if handled:
+            self._log(chat=chat_id, outcome="conduit_handled", choice=target["id"])
+            n_assistant = sum(1 for m in msgs if m.get("role") == "assistant")
+            user_id = (user or {}).get("id") or ""
+            if (v.delete_old_chat and n_user == 1 and n_assistant == 0 and chat_id
+                    and not chat_id.startswith("local:") and user_id):
+                self._schedule_cleanup(chat_id, user_id)
+            await self._emit(emitter, f"Switching to {target['name']}…", True)
+            raise HandoffSwitch(f"Switching to {target['name']}…")
+        self._remember_decline(chat_id, n_user)  # declined or failed: do not re-ask every message
+        if why == "declined":
+            self._log(chat=chat_id, outcome="conduit_declined", choice=target["id"])
+            await self._emit(emitter, "Staying in this chat.", True)
+            return body
+        if why == "model_unavailable":
+            log.error("handoff: Conduit says model '%s' is not available to this user. Check that the target id "
+                      "in targets_json is an exact Open WebUI model id the user can access.", target["id"])
+        self._log(chat=chat_id, outcome="conduit_failed", reason=why, choice=target["id"])
+        if not v.mobile_fallback:
+            await self._emit(emitter, "Staying in this chat.", True)
+            return body
+        text = self._fallback_text(target["name"])
+        await self._emit(emitter, text, True)
+        return self._with_notice(body, text)
+
+    async def _emit(self, emitter, description: str, done: bool) -> None:
+        """Status events are cosmetic: a failing emitter must never affect the reply."""
+        if not emitter:
+            return
+        try:
+            await emitter({"type": "status", "data": {"description": description, "done": done}})
+        except Exception as e:
+            self._log(outcome="emit_error", error=str(e))
 
     @staticmethod
     def _fallback_text(name: str) -> str:
@@ -651,6 +874,28 @@ class Filter:
 
     # ---------------------------------------------------------------- hook
     async def inlet(
+        self,
+        body: dict,
+        __user__: Optional[dict] = None,
+        __event_call__: Optional[Callable[[dict], Awaitable[Any]]] = None,
+        __event_emitter__: Optional[Callable[[dict], Awaitable[Any]]] = None,
+        __metadata__: Optional[dict] = None,
+        __task__: Optional[str] = None,
+        __model__: Optional[dict] = None,
+        __id__: Optional[str] = None,
+    ) -> dict:
+        """Never-block guarantee: whatever goes wrong inside the handoff logic, the user's message is
+        delivered to the current model unchanged. Only the deliberate HandoffSwitch escapes."""
+        try:
+            return await self._inlet(body, __user__, __event_call__, __event_emitter__,
+                                     __metadata__, __task__, __model__, __id__)
+        except HandoffSwitch:
+            raise
+        except Exception as e:
+            log.error("handoff failed, staying on the current model: %s: %s", type(e).__name__, e)
+            return body
+
+    async def _inlet(
         self,
         body: dict,
         __user__: Optional[dict] = None,
@@ -710,11 +955,17 @@ class Filter:
         target = next(t for t in targets if t["id"] == choice)
 
         if action == "hint":  # gentle, non-blocking
-            if __event_emitter__:
-                await __event_emitter__({"type": "status", "data": {
-                    "description": f"Tip: for something like this, start a new chat with “{target['name']}”.",
-                    "done": True}})
+            await self._emit(__event_emitter__,
+                             f"Tip: for something like this, start a new chat with “{target['name']}”.", True)
             return body
+
+        # 1b. Conduit app: native chat:handoff (Conduit asks the user itself). Detected, never assumed:
+        # a browser would wait forever on this event.
+        if v.conduit_native_handoff and await self._detect_client(__event_call__, chat_id) == "conduit":
+            c_files = msgs[-1].get("files") or meta.get("files") or body.get("files") or []
+            return await self._conduit_flow(
+                body, msgs=msgs, target=target, reason=reason, chat_id=chat_id, n_user=n_user, files=c_files,
+                user=__user__, model=__model__, call=__event_call__, emitter=__event_emitter__)
 
         # 2. Ask permission.
         ok = await self._ask(__event_call__, target, reason)
@@ -726,9 +977,7 @@ class Filter:
         # 3. Build the payload.
         last = msgs[-1]
         files = last.get("files") or meta.get("files") or body.get("files") or []
-        if __event_emitter__:
-            await __event_emitter__({"type": "status", "data": {
-                "description": f"Switching to {target['name']}…", "done": False}})
+        await self._emit(__event_emitter__, f"Switching to {target['name']}…", False)
         first_turn = n_user <= 1
         summary = ""
         if not first_turn:
@@ -756,16 +1005,12 @@ class Filter:
             if not navigated:
                 self._log(chat=chat_id, outcome="js_not_confirmed_raising")
             # 5. Stop the flash model from also answering in the old chat.
-            raise Exception(f"Switching to {target['name']}…")
+            raise HandoffSwitch(f"Switching to {target['name']}…")
 
         # 5b. The client could not run the script (e.g. a native mobile app). Do not strand the user
         # behind an error: tell them what to do, and let the current model answer so the chat still works.
         text = self._fallback_text(target["name"])
         self._log(chat=chat_id, outcome="mobile_fallback", choice=choice)
         self._remember_decline(chat_id, n_user)  # don't re-offer (and re-wait for the timeout) every message
-        if __event_emitter__:
-            try:
-                await __event_emitter__({"type": "status", "data": {"description": text, "done": True}})
-            except Exception as e:
-                self._log(chat=chat_id, outcome="fallback_emit_error", error=str(e))
+        await self._emit(__event_emitter__, text, True)
         return self._with_notice(body, text)
