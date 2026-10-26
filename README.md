@@ -2,11 +2,11 @@
 
 An [Open WebUI](https://github.com/open-webui/open-webui) **Filter** that lets admins keep users on a fast, cheap default model and offers a one-click switch to a specialist model when a request needs one.
 
-**Status:** pre-1.0 (currently `0.6.0`). See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+**Status:** pre-1.0 (currently `0.8.0`). See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 1. Attach the filter to your default model.
-2. A small router model compares the user's message to your list of specialist targets.
+2. A small router/decision model compares the user's message to your list of specialist targets.
 3. If one fits better, a popup card (specialist icon, name, description) asks: **Switch** or **Stay here**.
 4. On Switch, the conversation continues in a new chat on the specialist model. If the original chat held only that one message, it is deleted and hidden from the sidebar.
 
@@ -15,6 +15,7 @@ An [Open WebUI](https://github.com/open-webui/open-webui) **Filter** that lets a
 - Model card popup with dark-mode support, Escape = stay, and a plain-popup fallback (`show_model_card`).
 - Old single-message chat cleanup with immediate sidebar hiding and retries (`delete_old_chat`).
 - Router API keys encrypted at rest with Fernet, keyed from `WEBUI_SECRET_KEY` (`encrypt_api_keys`).
+- Graceful fallback for clients that cannot run browser scripts, such as native mobile apps: a text notice instead of an error, and the chat keeps working (`mobile_fallback`, `js_ack_timeout_s`).
 
 ## Install
 1. In Open WebUI: **Admin Panel > Functions > +**, paste `model_handoff.py`, save, and enable it.
@@ -22,7 +23,7 @@ An [Open WebUI](https://github.com/open-webui/open-webui) **Filter** that lets a
 3. Attach the filter to your default model.
 4. Make sure `WEBUI_SECRET_KEY` is set in the server environment.
 
-Requirements (installed automatically by Open WebUI): `httpx`, `cryptography`. Developed against Open WebUI v0.12.3.
+Requirements (installed automatically by Open WebUI): `httpx`, `cryptography`. Developed against Open WebUI v0.12.x.
 
 ## Development
 ```bash
@@ -33,8 +34,9 @@ Browser-script tests need `node` on the PATH.
 
 ## Known limitations
 - Sidebar hiding depends on Open WebUI's sidebar markup and fails harmlessly if it changes.
-- Valve save-back for key encryption assumes the function id equals the module name.
+- Key encryption saves back through Open WebUI's internal `Functions` model (not a public API). If that fails the filter logs "could not encrypt" and keeps working with the plaintext key.
 - Encryption protects exports and DB dumps, not someone who can read both the server environment and the database.
+- On mobile apps the old chat is not deleted, and the current model also answers after showing the notice.
 
 ## Reporting issues
 Please include your Open WebUI version, the filter version, and the server log lines containing `handoff`. For UI problems, add browser console lines starting with `handoff:`.
