@@ -2,7 +2,7 @@
 
 An [Open WebUI](https://github.com/open-webui/open-webui) **Filter** that lets admins keep users on a fast, cheap default model and offers a one-click switch to a specialist model when a request needs one.
 
-**Status:** pre-1.0 (currently `0.8.0`). See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+**Status:** pre-1.0 (currently `0.9.0`). See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 1. Attach the filter to your default model.
@@ -15,7 +15,8 @@ An [Open WebUI](https://github.com/open-webui/open-webui) **Filter** that lets a
 - Model card popup with dark-mode support, Escape = stay, and a plain-popup fallback (`show_model_card`).
 - Old single-message chat cleanup with immediate sidebar hiding and retries (`delete_old_chat`).
 - Router API keys encrypted at rest with Fernet, keyed from `WEBUI_SECRET_KEY` (`encrypt_api_keys`).
-- Graceful fallback for clients that cannot run browser scripts, such as native mobile apps: a text notice instead of an error, and the chat keeps working (`mobile_fallback`, `js_ack_timeout_s`).
+- **Conduit app support (native).** On [Conduit](https://github.com/cogwheel0/conduit) the filter uses Conduit's `chat:handoff` event: Conduit shows its own switch dialog and opens the new chat with the prompt ready in the composer (not auto-sent), and the old one-message chat is deleted from the server side. Needs a Conduit build that includes [PR #890](https://github.com/cogwheel0/conduit/pull/890) (`conduit_native_handoff`, `conduit_handoff_timeout_s`, `delete_delay_s`).
+- Graceful fallback for other clients that cannot run browser scripts, such as Open Relay: a text notice instead of an error, and the chat keeps working (`mobile_fallback`, `js_ack_timeout_s`).
 
 ## Install
 1. In Open WebUI: **Admin Panel > Functions > +**, paste `model_handoff.py`, save, and enable it.
@@ -36,7 +37,9 @@ Browser-script tests need `node` on the PATH.
 - Sidebar hiding depends on Open WebUI's sidebar markup and fails harmlessly if it changes.
 - Key encryption saves back through Open WebUI's internal `Functions` model (not a public API). If that fails the filter logs "could not encrypt" and keeps working with the plaintext key.
 - Encryption protects exports and DB dumps, not someone who can read both the server environment and the database.
-- On mobile apps the old chat is not deleted, and the current model also answers after showing the notice.
+- On Conduit, attachments are not carried over (the prompt lists them), the new chat's prompt is never auto-sent, and Conduit's sidebar may show the deleted chat until it refreshes.
+- On other mobile apps (no `chat:handoff`) the old chat is not deleted, and the current model also answers after showing the notice.
+- Server-side cleanup uses Open WebUI's internal `Chats` model (not a public API). If it changes, the filter logs a warning and leaves the old chat in place.
 
 ## Reporting issues
 Please include your Open WebUI version, the filter version, and the server log lines containing `handoff`. For UI problems, add browser console lines starting with `handoff:`.

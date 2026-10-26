@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+from conftest import is_probe
 from model_handoff import (Filter, build_handoff_prompt, build_js, classify,
                            parse_scores, text_of, validate_targets)
 
@@ -51,6 +52,8 @@ def _run(flt, body, confirm):
     calls = []
 
     async def call(ev):
+        if is_probe(ev):
+            return "browser"  # client-detection probe: answer like a browser, not a card/handoff call
         calls.append(ev["type"])
         return confirm if ev["type"] == "confirmation" else True
 
@@ -147,6 +150,8 @@ def test_decisions_backend_end_to_end(monkeypatch):
     events = []
 
     async def call(ev):
+        if is_probe(ev):
+            return "browser"
         events.append(ev)
         return False  # decline, so we only assert on the popup
 
@@ -171,6 +176,8 @@ def _accepted_js(msgs, **valves):
     codes = []
 
     async def call(ev):
+        if is_probe(ev):
+            return "browser"
         if ev["type"] == "execute":
             codes.append(ev["data"]["code"])
         return True

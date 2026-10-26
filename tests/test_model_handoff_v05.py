@@ -7,6 +7,7 @@ import sys
 import types
 
 import pytest
+from conftest import is_probe
 
 import model_handoff
 from model_handoff import (ENC_PREFIX, Filter, build_card_js, decrypt_secret, encrypt_secret,
@@ -67,6 +68,8 @@ def _body():
 
 def _drive(f, answer=False, calls=None):
     async def call(ev):
+        if is_probe(ev):
+            return "browser"
         if calls is not None:
             calls.append(ev)
         return answer
@@ -174,6 +177,8 @@ def test_card_accept_then_handoff(monkeypatch):
     types_seen = []
 
     async def call(ev):
+        if is_probe(ev):
+            return "browser"
         types_seen.append(ev["type"])
         return True
     with pytest.raises(Exception, match="Switching"):
@@ -186,6 +191,8 @@ def test_card_falls_back_to_plain_confirmation(monkeypatch):
     types_seen = []
 
     async def call(ev):
+        if is_probe(ev):
+            return "browser"
         types_seen.append(ev["type"])
         return None if ev["type"] == "execute" else False  # card gives no usable result
     asyncio.run(f.inlet(_body(), __event_call__=call, __metadata__={"chat_id": "c1"}))
@@ -197,6 +204,8 @@ def test_card_error_falls_back_and_wrapped_result_accepted(monkeypatch):
     seq = []
 
     async def boom(ev):
+        if is_probe(ev):
+            return "browser"
         seq.append(ev["type"])
         if ev["type"] == "execute":
             raise RuntimeError("frontend exploded")
@@ -208,6 +217,8 @@ def test_card_error_falls_back_and_wrapped_result_accepted(monkeypatch):
     seq2 = []
 
     async def wrapped(ev):
+        if is_probe(ev):
+            return "browser"
         seq2.append(ev["type"])
         return {"result": False}
     asyncio.run(f2.inlet(_body(), __event_call__=wrapped, __metadata__={"chat_id": "c2"}))
