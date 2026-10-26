@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - run: pip install pytest httpx cryptography
+      - run: pip install pytest httpx cryptography pydantic
       - run: python -m pytest -q
       - name: Header version matches top CHANGELOG entry
         run: |
