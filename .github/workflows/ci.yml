@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install pytest httpx cryptography
+      - run: python -m pytest -q
+      - name: Header version matches top CHANGELOG entry
+        run: |
+          v=$(grep -m1 -E '^version:' model_handoff.py | awk '{print $2}')
+          c=$(grep -m1 -E '^## ' CHANGELOG.md | sed 's/^## *//' | awk '{print $1}')
+          echo "header=$v changelog=$c"
+          [ -n "$v" ] && [ "$v" = "$c" ] || { echo "::error::Version mismatch between model_handoff.py header and top CHANGELOG entry"; exit 1; }

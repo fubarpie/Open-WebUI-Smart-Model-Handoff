@@ -1,0 +1,63 @@
+name: Release
+
+# Publishes a GitHub Release whenever the version in the model_handoff.py
+# header has no matching tag yet. Merge a PR that bumps the version (and adds a
+# CHANGELOG entry) and the release appears automatically.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - model_handoff.py
+      - CHANGELOG.md
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest httpx cryptography
+      - run: python -m pytest -q
+      - name: Detect version
+        id: ver
+        run: |
+          v=$(grep -m1 -E '^version:' model_handoff.py | awk '{print $2}')
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::Bad version '$v'"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag v$v already exists; nothing to release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Extract release notes
+        if: steps.ver.outputs.exists == 'false'
+        run: |
+          v='${{ steps.ver.outputs.version }}'
+          awk -v v="$v" '
+            /^## /{ if (found) exit; if ($2 == v) { found=1; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::No CHANGELOG section for $v"; exit 1; }
+          cat notes.md
+      - name: Create release
+        if: steps.ver.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v='${{ steps.ver.outputs.version }}'
+          flags=""
+          [[ "$v" == *-* ]] && flags="--prerelease"
+          # Pre-1.0 releases are marked as pre-release so "latest" stays meaningful after 1.0.
+          [[ "$v" == 0.* ]] && flags="--prerelease"
+          gh release create "v$v" model_handoff.py \
+            --target "$GITHUB_SHA" \
+            --title "Model Handoff v$v" \
+            --notes-file notes.md $flags
