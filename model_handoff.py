@@ -1,18 +1,20 @@
 """
 title: Model Handoff
 author: Keenan Ventling
-version: 0.6.0
+version: 0.8.0
 license: MIT
-description: Attach to a fast general-purpose model. When a request fits a specialist model better, asks the user (popup) and, if they agree, continues the conversation in a new chat on that model. If the original chat held only a single user message, it is deleted after the handoff and its sidebar entry is hidden immediately, with retries (valve: delete_old_chat). The confirmation popup shows a card with the specialist model's icon and description (valve: show_model_card). API keys are encrypted at rest (Fernet, key derived from WEBUI_SECRET_KEY; valve: encrypt_api_keys). Admin-configurable target list. Developed against Open WebUI v0.12.3.
+description: Attach to a fast general-purpose model. When a request fits a specialist model better, asks the user (popup) and, if they agree, continues the conversation in a new chat on that model. If the original chat held only a single user message, it is deleted after the handoff and its sidebar entry is hidden immediately, with retries (valve: delete_old_chat). The confirmation popup shows a card with the specialist model's icon and description (valve: show_model_card). API keys are encrypted at rest (Fernet, key derived from WEBUI_SECRET_KEY; valve: encrypt_api_keys); 0.8.0 fixes the save-back so the stored valve really becomes enc:v1:... (the function id now comes from Open WebUI's __id__). On clients that cannot run the browser script (e.g. native mobile apps like Conduit) the handoff degrades gracefully: the user gets a text notice to start a new chat on the specialist and the current chat keeps working (valves: mobile_fallback, js_ack_timeout_s). Admin-configurable target list. Developed against Open WebUI v0.12.3.
 requirements: httpx, cryptography
 """
 
+import asyncio
 import base64
 import hashlib
 import inspect
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Awaitable, Callable, Optional
 
@@ -456,6 +458,8 @@ class Filter:
         offer_way_back: bool = Field(True, description="Tell the specialist how the user can return to the quick assistant.")
         delete_old_chat: bool = Field(True, description="After a handoff, delete the old chat if it contained only ONE user message (nothing worth keeping). Needs auto_send on.")
         show_model_card: bool = Field(True, description="Show the specialist's icon and description in a card on the popup. Falls back to the plain popup if the card cannot be shown.")
+        mobile_fallback: bool = Field(True, description="If the client cannot run the handoff script (native mobile apps, no browser DOM), do not abort the reply: show a text notice telling the user to start a new chat with the specialist, and answer in the current chat. Turn off to restore the old behaviour (raise an error to stop the reply).")
+        js_ack_timeout_s: float = Field(10.0, description="How long to wait for the client to confirm it ran the handoff script before assuming it cannot (non-web client).")
         encrypt_api_keys: bool = Field(True, description="Encrypt api_key / chat_api_key at rest (Fernet, key derived from WEBUI_SECRET_KEY). A plaintext key is encrypted and saved back automatically on first use.")
         log_decisions: bool = Field(True, description="Log scores and outcomes to the server log for tuning.")
 
@@ -465,6 +469,7 @@ class Filter:
         self._api_key = ""       # resolved (decrypted) keys for the current request; never logged
         self._chat_api_key = ""
         self._persist_warned = False
+        self._fid: Optional[str] = None  # real function id, set from __id__ in inlet
 
     # ---------------------------------------------------------------- internals
     def _log(self, **kw):
@@ -488,6 +493,17 @@ class Filter:
             return f"{type(e).__name__}: {e}"
         return None
 
+    def _function_id(self) -> str:
+        """The Open WebUI function id used to save valves.
+
+        Open WebUI passes it to inlet as __id__. As a fallback, parse it from the module name, which Open WebUI
+        sets to 'function_<id>_<32 hex chars>' (it is NOT the bare id, which was the 0.5.0-0.7.0 bug).
+        """
+        if self._fid:
+            return self._fid
+        m = re.fullmatch(r"function_(.+)_[0-9a-f]{32}", type(self).__module__ or "")
+        return m.group(1) if m else ""
+
     async def _persist_encrypted(self) -> None:
         """Best effort: encrypt plaintext keys and save the ciphertext back over the valves.
 
@@ -506,7 +522,9 @@ class Filter:
                 if new[field] and not is_encrypted(new[field]):
                     new[field] = encrypt_secret(new[field], secret)
             from open_webui.models.functions import Functions  # internal API
-            fid = type(self).__module__  # Open WebUI names the module after the function id
+            fid = self._function_id()
+            if not fid:
+                raise RuntimeError(f"cannot determine the function id (module '{type(self).__module__}')")
             found = Functions.get_function_by_id(fid)
             if inspect.isawaitable(found):
                 found = await found
@@ -591,6 +609,46 @@ class Filter:
         return bool(await call({"type": "confirmation", "data": {
             "title": f"Switch to {target['name']}?", "message": f"{lead}{hint}\n\n{footer}"}}))
 
+    async def _run_handoff_js(self, call: Callable[[dict], Awaitable[Any]], code: str) -> bool:
+        """Run the navigation script; True only if the client confirmed it ran (the script ends with
+        `return true`). Timeout, exception or any other result (None, False) means a client without a
+        browser DOM, e.g. a native mobile app."""
+        try:
+            res = await asyncio.wait_for(call({"type": "execute", "data": {"code": code}}),
+                                         timeout=self.valves.js_ack_timeout_s)
+        except asyncio.TimeoutError:
+            self._log(outcome="js_no_ack", reason="timeout")
+            return False
+        except Exception as e:
+            self._log(outcome="js_no_ack", reason="error", error=str(e))
+            return False
+        if isinstance(res, dict):  # tolerate a wrapped result
+            res = res.get("result", res.get("value", res))
+        if res is True:
+            return True
+        self._log(outcome="js_no_ack", reason="result", got=repr(res)[:80])
+        return False
+
+    @staticmethod
+    def _fallback_text(name: str) -> str:
+        return (f"This looks like a good fit for {name}, but your current app doesn't support automatic "
+                f"chat switching. Please copy your prompt and start a new chat with the {name} model.")
+
+    @staticmethod
+    def _with_notice(body: dict, text: str) -> dict:
+        """Copy of body whose system prompt asks the model to open its reply with the notice, so the user
+        sees it in any client (the status event alone may not be rendered everywhere)."""
+        note = ("Begin your reply with exactly this notice on its own paragraph, word for word, then "
+                f"answer the user's request normally:\n\"{text}\"")
+        msgs = list(body.get("messages", []))
+        if msgs and msgs[0].get("role") == "system":
+            first = dict(msgs[0])
+            first["content"] = f"{text_of(first)}\n\n{note}"
+            msgs[0] = first
+        else:
+            msgs.insert(0, {"role": "system", "content": note})
+        return {**body, "messages": msgs}
+
     # ---------------------------------------------------------------- hook
     async def inlet(
         self,
@@ -601,7 +659,10 @@ class Filter:
         __metadata__: Optional[dict] = None,
         __task__: Optional[str] = None,
         __model__: Optional[dict] = None,
+        __id__: Optional[str] = None,
     ) -> dict:
+        if __id__:
+            self._fid = __id__
         v = self.valves
         meta = __metadata__ or {}
         msgs = body.get("messages", [])
@@ -689,7 +750,22 @@ class Filter:
         drop = (chat_id if (v.delete_old_chat and v.auto_send and n_user == 1 and n_assistant == 0
                             and chat_id and not chat_id.startswith("local:")) else "")
         self._log(chat=chat_id, cleanup=bool(drop))
-        await __event_call__({"type": "execute", "data": {"code": build_js(choice, prompt, files, v.auto_send, drop)}})
+        navigated = await self._run_handoff_js(__event_call__, build_js(choice, prompt, files, v.auto_send, drop))
 
-        # 5. Stop the flash model from also answering in the old chat.
-        raise Exception(f"Switching to {target['name']}…")
+        if navigated or not v.mobile_fallback:
+            if not navigated:
+                self._log(chat=chat_id, outcome="js_not_confirmed_raising")
+            # 5. Stop the flash model from also answering in the old chat.
+            raise Exception(f"Switching to {target['name']}…")
+
+        # 5b. The client could not run the script (e.g. a native mobile app). Do not strand the user
+        # behind an error: tell them what to do, and let the current model answer so the chat still works.
+        text = self._fallback_text(target["name"])
+        self._log(chat=chat_id, outcome="mobile_fallback", choice=choice)
+        self._remember_decline(chat_id, n_user)  # don't re-offer (and re-wait for the timeout) every message
+        if __event_emitter__:
+            try:
+                await __event_emitter__({"type": "status", "data": {"description": text, "done": True}})
+            except Exception as e:
+                self._log(chat=chat_id, outcome="fallback_emit_error", error=str(e))
+        return self._with_notice(body, text)
