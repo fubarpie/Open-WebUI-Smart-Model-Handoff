@@ -72,7 +72,7 @@ def _drive(f, answer=False, calls=None):
         return answer
 
     async def go():
-        return await f.inlet(_body(), __event_call__=call, __metadata__={"chat_id": "c1"})
+        return await f.inlet(_body(), __event_call__=call, __metadata__={"chat_id": "c1"}, __id__="model_handoff")
     return asyncio.run(go())
 
 
@@ -89,7 +89,7 @@ def test_plaintext_valve_triggers_encrypt_and_save(monkeypatch):
     class FakeFunctions:
         @staticmethod
         def get_function_by_id(fid):
-            return object() if fid == model_handoff.Filter.__module__ else None
+            return object() if fid == "model_handoff" else None  # the real id, not the module name
 
         @staticmethod
         async def update_function_valves_by_id(fid, valves):  # async variant must also work
