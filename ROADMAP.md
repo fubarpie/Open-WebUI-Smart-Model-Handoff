@@ -8,18 +8,16 @@ _Last re-planned after v0.8.0. Milestone numbers continue from the shipped versi
 - [x] Valve save-back verified in a real instance; uses the real function id via `__id__` (0.8.0).
 - [x] Release automation: pushing a version bump to `main` creates the tag and GitHub Release (`release.yml`).
 - [x] CI (GitHub Actions) runs the test suite.
+- [x] Mobile fallback for clients that cannot run the handoff script (Conduit, Open Relay): shows a text notice, the current model answers, no generation error (0.7.0). Auto-switching on mobile is not supported yet; see 1.1.
 - [x] Sidebar hiding of the old chat with retries, and DELETE status check (0.6.0).
 - [x] Model card popup and Fernet encryption of API keys at rest (0.5.0).
-
-## Attempted, not working
-- [ ] Mobile fallback (0.7.0) does not work on Conduit or Open Relay in practice. Tracked under 1.1 below; not a 1.0 blocker.
 
 ## 0.9 - Safe to ship
 - [ ] Never block a user message: every failure path degrades to "stay here", with tested logging.
 - [ ] Validate `targets_json` on save: unknown model IDs, duplicates, bad JSON give clear errors.
 - [ ] Permissions: only offer targets the user can access.
 - [ ] Run the test suite against a real `open_webui` install in CI.
-- [ ] Confirm the card `execute` return value path; remove or simplify the fallback if proven.
+- [ ] Confirm the card `execute` return value path; remove or simplify the card's plain-popup fallback if proven.
 - [ ] Confirm sidebar hiding against the real markup; add a console diagnostic mode.
 
 ## 0.10 - Documentable
@@ -32,11 +30,11 @@ _Last re-planned after v0.8.0. Milestone numbers continue from the shipped versi
 - [ ] Publish to the Open WebUI community functions directory.
 - [ ] Migration note from 0.x valve names.
 - [ ] Freeze the valve schema and follow semver afterwards.
-- [ ] Document known limitations plainly: mobile apps (Conduit, Open Relay) are not supported yet, and key rotation and the browser-script threat model are post-1.0.
+- [ ] Document known limitations plainly: on mobile apps (Conduit, Open Relay) handoff does not auto-switch models, you only get the text notice; key rotation and the browser-script threat model are post-1.0.
 
 ## 1.1 and later
 ### Mobile app support
-- [ ] Make handoff work on Conduit and Open Relay (clients that cannot run the handoff script). Investigate a server-side-only path, then replace or remove the 0.7.0 fallback.
+- [ ] Auto-switching on Conduit and Open Relay (clients that cannot run the handoff script). Investigate a server-side-only path that performs the switch without the browser script. Keep the existing 0.7.0 text-notice fallback as the safe default when the switch cannot be done.
 
 ### Routing quality
 - [ ] Router prompt tuning plus a fixture set of sample messages with expected targets, scored in tests.
