@@ -7,6 +7,7 @@ Convention: every behavior change bumps the version in the `model_handoff.py` he
 - **Server-side cleanup of the old chat.** After Conduit confirms the switch, a one-message chat is deleted straight from Open WebUI's database (no client involved): guarded (single user message, no real assistant reply, not pinned/archived/in a folder/shared, scoped to the user), delayed (`delete_delay_s`, then a second pass) and fully exception-safe (`delete_old_chat`; `auto_send` does not apply).
 - Conduit failure reasons (`declined`, `model_unavailable`, `not_active_chat`, `busy`, `duplicate`, `invalid`, `unsupported`, `failed`, timeout) all degrade to staying in the current chat; a decline is silent and starts the normal cooldown.
 - Attachments are not carried over by Conduit; the handoff prompt lists them so the user can re-attach.
+- **Never-block guarantee.** `inlet` now catches any unexpected error in the handoff logic and delivers the user's message to the current model unchanged; only the deliberate switch signal escapes. A failing confirmation popup counts as "stay" instead of an error.
 - Browser behaviour is unchanged, apart from one extra fast probe event before the popup.
 ## 0.8.0
 - **Fix: API key encryption never saved back.** Open WebUI loads functions as modules named `function_<id>_<random hex>`, so the old `__module__`-as-id lookup never matched and the key stayed in plaintext (logged as "could not encrypt"). The filter now uses the `__id__` that Open WebUI passes to `inlet`, with a fallback that parses the real module-name pattern.
