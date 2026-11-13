@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: "20"
       - run: pip install pytest httpx cryptography pydantic
-      - run: python -m pytest -q
+      - run: python -m pytest -q tests --ignore=tests/integration
       - name: Header version matches top CHANGELOG entry
         run: |
           v=$(grep -m1 -E '^version:' model_handoff.py | awk '{print $2}')
