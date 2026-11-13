@@ -1,6 +1,9 @@
 # Changelog
 Convention: every behavior change bumps the version in the `model_handoff.py` header.
 
+## 0.10.0
+- **Filter targets by model access before routing.** When Open WebUI supplies user and model context, private, unknown, inactive, and arena models are never disclosed to the decision model. Owners, inherited group grants, and the v0.13.3 admin/model bypass settings are honored. Permission lookup failures skip routing and leave the current chat unchanged; requests without that context retain legacy behavior.
+
 ## 0.9.0
 - **Conduit app support.** The filter now detects the [Conduit](https://github.com/cogwheel0/conduit) mobile app (PR #890, `chat:handoff`) and hands off natively: Conduit shows its own switch dialog and opens the new chat on the specialist with the prompt ready, **unsent**, in the composer. No popup of our own is shown on Conduit (`conduit_native_handoff`, `conduit_handoff_timeout_s`).
 - **Client detection.** Before offering a switch, one cheap `execute` probe tells Conduit (replies with `client: conduit` and `chat:handoff` in `capabilities`) from a browser. `chat:handoff` is only ever sent to a positively detected Conduit, because a browser would wait forever. Older Conduit builds and other apps keep the 0.7.0 text-notice fallback. The result is cached per chat.
