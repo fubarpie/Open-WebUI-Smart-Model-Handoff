@@ -1,9 +1,9 @@
 """
 title: Model Handoff
 author: Keenan Ventling
-version: 0.9.0
+version: 0.10.0
 license: MIT
-description: Attach to a fast general-purpose model. When a request fits a specialist model better, asks the user (popup) and, if they agree, continues the conversation in a new chat on that model. If the original chat held only a single user message, it is deleted after the handoff and its sidebar entry is hidden immediately, with retries (valve: delete_old_chat). The confirmation popup shows a card with the specialist model's icon and description (valve: show_model_card). API keys are encrypted at rest (Fernet, key derived from WEBUI_SECRET_KEY; valve: encrypt_api_keys); 0.8.0 fixes the save-back so the stored valve really becomes enc:v1:... (the function id now comes from Open WebUI's __id__). The Conduit mobile app is supported natively through its chat:handoff event (valve: conduit_native_handoff): Conduit shows its own switch dialog and opens the new chat with the prompt ready in the composer, and the old one-message chat is deleted from the server side. On other clients that cannot run the browser script (e.g. Open Relay) the handoff degrades gracefully: the user gets a text notice to start a new chat on the specialist and the current chat keeps working (valves: mobile_fallback, js_ack_timeout_s). Admin-configurable target list. Developed against Open WebUI v0.12.3.
+description: Attach to a fast general-purpose model. When a request fits a specialist model better, asks the user (popup) and, if they agree, continues the conversation in a new chat on that model. If the original chat held only a single user message, it is deleted after the handoff and its sidebar entry is hidden immediately, with retries (valve: delete_old_chat). The confirmation popup shows a card with the specialist model's icon and description (valve: show_model_card). API keys are encrypted at rest (Fernet, key derived from WEBUI_SECRET_KEY; valve: encrypt_api_keys); 0.8.0 fixes the save-back so the stored valve really becomes enc:v1:... (the function id now comes from Open WebUI's __id__). The Conduit mobile app is supported natively through its chat:handoff event (valve: conduit_native_handoff): Conduit shows its own switch dialog and opens the new chat with the prompt ready in the composer, and the old one-message chat is deleted from the server side. On other clients that cannot run the browser script (e.g. Open Relay) the handoff degrades gracefully: the user gets a text notice to start a new chat on the specialist and the current chat keeps working (valves: mobile_fallback, js_ack_timeout_s). Admin-configurable target list. Developed against Open WebUI v0.13.3.
 requirements: httpx, cryptography
 """
 
@@ -565,6 +565,50 @@ class Filter:
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
 
+    async def _accessible_targets(self, targets: list[dict], user: dict) -> list[dict]:
+        """Apply Open WebUI v0.13.3 model-list access semantics before routing."""
+        try:
+            from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
+            from open_webui.env import BYPASS_MODEL_ACCESS_CONTROL
+            from open_webui.models.access_grants import AccessGrants
+            from open_webui.models.groups import Groups
+            from open_webui.models.models import Models
+
+            role = user.get('role')
+            user_id = user.get('id')
+            if not user_id:
+                raise ValueError('user context has no id')
+            # Access bypasses never make evaluation arena models handoff targets.
+            candidates = [t for t in targets if t['id'] != 'arena-model' and not t['id'].startswith('arena:')]
+            controlled = role == 'user' or (role == 'admin' and not BYPASS_ADMIN_ACCESS_CONTROL)
+            if not controlled or BYPASS_MODEL_ACCESS_CONTROL:
+                return candidates
+
+            ids = [t['id'] for t in candidates]
+            model_infos = await Models.get_all_models()
+            infos_by_id = {info.id: info for info in model_infos}
+            groups = await Groups.get_groups_by_member_id(user_id, include_inherited=True)
+            user_group_ids = {group.id for group in groups}
+            accessible_ids = await AccessGrants.get_accessible_resource_ids(
+                user_id=user_id, resource_type='model', resource_ids=ids,
+                permission='read', user_group_ids=user_group_ids,
+            )
+
+            accessible = []
+            for target in candidates:
+                info = infos_by_id.get(target['id'])
+                if info is None:
+                    if role == 'admin':  # Unconfigured models are admin-only upstream.
+                        accessible.append(target)
+                elif info.is_active and (user_id == info.user_id or target['id'] in accessible_ids):
+                    accessible.append(target)
+            return accessible
+        except Exception as e:
+            # Permission lookups fail closed for routing, without affecting this chat.
+            log.error('handoff target access lookup failed; skipping routing: %s: %s',
+                      type(e).__name__, e)
+            return []
+
     async def _decide(self, msgs: list[dict], targets: list[dict]):
         """Returns (scores, reason). The 'decisions' backend has no prose, so its reason is ''."""
         v = self.valves
@@ -914,6 +958,10 @@ class Filter:
         targets, errors = validate_targets(v.targets_json)
         if errors:
             log.warning("handoff config errors: %s", errors)
+        if __user__ is not None and __model__ is not None and targets:
+            # Arena models are never valid handoff targets.
+            targets = await self._accessible_targets(
+                [t for t in targets if not t['id'].startswith('arena:')], __user__)
         key_error = self._resolve_keys() if v.enabled else None
         if key_error:
             log.error("handoff cannot decrypt the stored API key (%s). Re-enter it in the valves "
